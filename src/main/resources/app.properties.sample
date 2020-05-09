@@ -1,0 +1,30 @@
+# datasource properties
+datasource.driverClassName=com.mysql.cj.jdbc.Driver
+datasource.username=user
+datasource.password=password
+datasource.url=jdbc:mysql://localhost/database
+dataSource.maxActive=10
+dataSource.maxIdle=5
+dataSource.initialSize=5
+dataSource.validationQuery=SELECT 1
+#
+# data requesting settings
+script.incomeTableName=table2
+script.incomeIdField=id
+script.incomeUrlField=website
+#
+# data updating settings
+script.outcomeTableName=table2
+script.outcomeIdField=id
+script.outcomeEmailsField=email
+script.outcomeEmailsFieldLength=255
+#
+# script settings
+script.processingBatchSize=1000
+script.processingStartOffset=0
+script.processingInfoMessageTimeoutMills=3000
+#
+# crawler processor settings
+script.crawlerThreadsCount=20
+script.crawlerMaxLinksForPage=5
+script.crawlerMaxInheritance=5
