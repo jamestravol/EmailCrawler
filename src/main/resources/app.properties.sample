@@ -22,9 +22,11 @@ script.outcomeEmailsFieldLength=255
 # script settings
 script.processingBatchSize=1000
 script.processingStartOffset=0
-script.processingInfoMessageTimeoutMills=3000
 #
 # crawler processor settings
 script.crawlerThreadsCount=20
 script.crawlerMaxLinksForPage=5
 script.crawlerMaxInheritance=5
+script.crawlerSkipDomainsList=facebook.com,vk.com
+script.crawlerSkipEmailsPatterns=noreply@.+,.+@example.com
+script.crawlerPriorityLinkContains=contact,email,about

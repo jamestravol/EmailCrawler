@@ -1,5 +1,10 @@
-package jt.upwork.crawler;
+package jt.upwork.crawler.script;
 
+import jt.upwork.crawler.Crawler;
+import jt.upwork.crawler.UrlUtils;
+import jt.upwork.crawler.WebSite;
+import jt.upwork.crawler.statistics.IgnoredCloseable;
+import jt.upwork.crawler.statistics.RuntimeStatistics;
 import org.apache.commons.beanutils.BeanUtils;
 import org.apache.commons.dbcp.BasicDataSource;
 
@@ -17,6 +22,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -26,6 +33,7 @@ import java.util.stream.Collectors;
  *
  * @author jamestravol
  */
+@SuppressWarnings("unused")
 public final class ProcessingScript {
 
     private static final Logger LOGGER = Logger.getLogger(ProcessingScript.class.getName());
@@ -43,50 +51,63 @@ public final class ProcessingScript {
 
     private int processingBatchSize;
     private int processingStartOffset;
-    private long processingInfoMessageTimeoutMills;
 
     private int crawlerThreadsCount;
     private int crawlerMaxLinksForPage;
     private int crawlerMaxInheritance;
+    private String crawlerSkipDomainsList;
+    private String crawlerSkipEmailsPatterns;
+    private String crawlerPriorityLinkContains;
 
     private volatile String outcomeSql;
 
     /**
      * Executing the process
-     *
-     * @throws IOException
-     * @throws InvocationTargetException
-     * @throws IllegalAccessException
      */
     void execute() throws IOException, InvocationTargetException, IllegalAccessException {
 
+        final RuntimeStatistics statistics = new RuntimeStatistics();
+        statistics.start();
         initFromProperties();
 
         outcomeSql = createOutcomeSql();
 
-        Crawler crawler = createCrawler();
+        final Crawler crawler = createCrawler();
 
-        LOGGER.info("Obtainint the database connection");
+        // startup the statistics timer. It logs the statistics every 300 mills to sout
+        final Timer timer = new Timer(true);
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() {
+                statistics.log(crawler.getPool());
+            }
+        }, 300, 300);
+
+        LOGGER.info("Obtaining the database connection");
 
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
 
             int step = 0;
 
+            // thi flag shows if current batch contains any applicable items
             boolean hasItems = true;
 
             while (hasItems) {
 
                 LOGGER.info(String.format("Requesting the batch step %d", step));
 
-                try (final ResultSet resultSet = statement.executeQuery(createIncomeSql(step++))) {
+                List<WebSite> webSites = new ArrayList<>(processingBatchSize);
 
-                    List<WebSite> webSites = new ArrayList<>(processingBatchSize);
+                final long mills = System.currentTimeMillis();
+
+                try (final IgnoredCloseable ignored = statistics.getDataRequest().start(); final ResultSet resultSet = statement.executeQuery(createIncomeSql(step++))) {
 
                     hasItems = false;
 
                     while (resultSet.next()) {
                         hasItems = true;
 
+                        // trying to form an url
                         final String url = resultSet.getString(incomeUrlField);
                         final Optional<URL> urlOptional = UrlUtils.makeUrl(url);
                         if (urlOptional.isPresent()) {
@@ -95,35 +116,41 @@ public final class ProcessingScript {
                             LOGGER.severe(String.format("Unable to form URL from '%s'. Skipping...", url));
                         }
                     }
+                    statistics.getDataRequest().success(System.currentTimeMillis() - mills);
+                }
 
-                    if (!webSites.isEmpty()) {
-                        waitForCrawler(crawler);
-                        LOGGER.info(String.format("Crawling for new %s websites", webSites.size()));
-                        // when crawler finishes the batch we add a new one
-                        crawler.crawl(webSites, this::onComplete);
-                    }
+                if (!webSites.isEmpty()) {
+                    LOGGER.info(String.format("Awaiting for %d tasks left in the crawler's queue", crawlerThreadsCount));
+                    // when the queue is small enough we add new new batch
+                    crawler.await(crawlerThreadsCount);
+                    LOGGER.info(String.format("Crawling for new %s websites", webSites.size()));
+                    crawler.crawl(webSites, statistics, this::onComplete);
                 }
 
             }
 
             // wait at the end
-            waitForCrawler(crawler);
+            LOGGER.info("Awaiting for the crawler to finish");
+            while (true) {
+                if (crawler.getPool().awaitQuiescence(1, TimeUnit.DAYS)) {
+                    break;
+                }
+            }
+
+            crawler.getPool().shutdown();
+            try {
+                crawler.getPool().awaitTermination(1, TimeUnit.DAYS);
+            } catch (InterruptedException ignored) {
+            }
+
+            timer.cancel();
+
+            statistics.log(crawler.getPool());
 
         } catch (SQLException e) {
             LOGGER.severe(String.format("SQL exception occurred. Message: %s", e));
         }
 
-    }
-
-    private void waitForCrawler(Crawler crawler) {
-        LOGGER.info("Awaiting for the crawler to be free");
-
-        // wait for he crawler is free
-        while (!crawler.await(this.processingInfoMessageTimeoutMills, TimeUnit.MILLISECONDS)) {
-            LOGGER.info(String.format("Crawling in process. Parallelism: %d. Active threads: %d. Queued task count: %d",
-                    crawler.getPool().getParallelism(), crawler.getPool().getActiveThreadCount(),
-                    crawler.getPool().getQueuedTaskCount()));
-        }
     }
 
     private void initFromProperties() throws IOException, InvocationTargetException, IllegalAccessException {
@@ -145,15 +172,25 @@ public final class ProcessingScript {
     }
 
     private Crawler createCrawler() {
-        if (crawlerThreadsCount == 0) {
-            LOGGER.info(String.format("Creating the Crawler with params - maxLinksForPage: %s, maxInheritance: %s",
-                    crawlerMaxLinksForPage, crawlerMaxInheritance));
-            return new Crawler(crawlerMaxLinksForPage, crawlerMaxInheritance);
-        } else {
-            LOGGER.info(String.format("Creating the Crawler with params - maxLinksForPage: %s, maxInheritance: %s, threadCount: %s",
-                    crawlerMaxLinksForPage, crawlerMaxInheritance, crawlerThreadsCount));
-            return new Crawler(crawlerMaxLinksForPage, crawlerMaxInheritance, crawlerThreadsCount);
+
+        LOGGER.info(String.format("Creating the Crawler with params - maxLinksForPage: %s, maxInheritance: %s, threadCount: %s",
+                crawlerMaxLinksForPage, crawlerMaxInheritance, crawlerThreadsCount));
+        return new Crawler(crawlerMaxLinksForPage,
+                crawlerMaxInheritance,
+                crawlerThreadsCount,
+                getTrimmedArray(crawlerSkipDomainsList),
+                getTrimmedArray(crawlerSkipEmailsPatterns),
+                getTrimmedArray(crawlerPriorityLinkContains));
+
+    }
+
+    private String[] getTrimmedArray(String value) {
+        final String[] skipDomains = value.split(",");
+
+        for (int i = 0; i < skipDomains.length; i++) {
+            skipDomains[i] = skipDomains[i].trim();
         }
+        return skipDomains;
     }
 
     private void onComplete(WebSite webSite, Set<String> emails) {
@@ -263,14 +300,6 @@ public final class ProcessingScript {
         this.processingStartOffset = processingStartOffset;
     }
 
-    public long getProcessingInfoMessageTimeoutMills() {
-        return processingInfoMessageTimeoutMills;
-    }
-
-    public void setProcessingInfoMessageTimeoutMills(long processingInfoMessageTimeoutMills) {
-        this.processingInfoMessageTimeoutMills = processingInfoMessageTimeoutMills;
-    }
-
     public int getCrawlerThreadsCount() {
         return crawlerThreadsCount;
     }
@@ -293,5 +322,29 @@ public final class ProcessingScript {
 
     public void setCrawlerMaxInheritance(int crawlerMaxInheritance) {
         this.crawlerMaxInheritance = crawlerMaxInheritance;
+    }
+
+    public String getCrawlerSkipDomainsList() {
+        return crawlerSkipDomainsList;
+    }
+
+    public void setCrawlerSkipDomainsList(String crawlerSkipDomainsList) {
+        this.crawlerSkipDomainsList = crawlerSkipDomainsList;
+    }
+
+    public String getCrawlerSkipEmailsPatterns() {
+        return crawlerSkipEmailsPatterns;
+    }
+
+    public void setCrawlerSkipEmailsPatterns(String crawlerSkipEmailsPatterns) {
+        this.crawlerSkipEmailsPatterns = crawlerSkipEmailsPatterns;
+    }
+
+    public String getCrawlerPriorityLinkContains() {
+        return crawlerPriorityLinkContains;
+    }
+
+    public void setCrawlerPriorityLinkContains(String crawlerPriorityLinkContains) {
+        this.crawlerPriorityLinkContains = crawlerPriorityLinkContains;
     }
 }

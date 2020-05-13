@@ -9,11 +9,14 @@ import java.util.Comparator;
  */
 public final class UrlComparator implements Comparator<String> {
 
-    private static final String[] KEYWORDS = {"contact", "email", "about"};
+    private final String[] keywords;
 
-    static final UrlComparator INSTANCE = new UrlComparator();
+    public static UrlComparator of(String[] keywords) {
+        return new UrlComparator(keywords);
+    }
 
-    private UrlComparator() {
+    private UrlComparator(String[] keywords) {
+        this.keywords = keywords;
     }
 
     @Override
@@ -36,7 +39,7 @@ public final class UrlComparator implements Comparator<String> {
     private boolean containsKeywords(String url) {
 
         if (url != null) {
-            for (String keyword : KEYWORDS) {
+            for (String keyword : keywords) {
                 if (url.toLowerCase().contains(keyword)) {
                     return true;
                 }

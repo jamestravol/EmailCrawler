@@ -1,5 +1,8 @@
 package jt.upwork.crawler;
 
+import jt.upwork.crawler.statistics.IgnoredCloseable;
+import jt.upwork.crawler.statistics.RuntimeStatistics;
+import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -12,8 +15,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.RecursiveTask;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -34,29 +36,32 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
 
     private final URL rootDomain;
     private final URL fullLink;
+    private final Crawler crawler;
     private final int currentInheritance;
-    private final int maxLinksForPage;
-    private final int maxInheritance;
-    private final ConcurrentMap<URL, Object> processedUrls;
+    protected final RuntimeStatistics statistics;
+    private final ConcurrentLinkedQueue<URL> processedUrls;
 
-    public EmailExtractionTask(URL rootDomain, URL fullLink, int currentInheritance, int maxLinksForPage, int maxInheritance) {
-        this(rootDomain, fullLink, currentInheritance, maxLinksForPage, maxInheritance, new ConcurrentHashMap<>());
+    protected EmailExtractionTask(URL rootDomain, URL fullLink, int currentInheritance, Crawler crawler, RuntimeStatistics statistics) {
+        this(rootDomain, fullLink, currentInheritance, crawler, statistics, new ConcurrentLinkedQueue<URL>());
     }
 
-    private EmailExtractionTask(URL rootDomain, URL fullLink, int currentInheritance, int maxLinksForPage, int maxInheritance,
-                                ConcurrentMap<URL, Object> processedUrls) {
+    private EmailExtractionTask(URL rootDomain, URL fullLink, int currentInheritance, Crawler crawler, RuntimeStatistics statistics,
+                                ConcurrentLinkedQueue<URL> processedUrls) {
         this.rootDomain = rootDomain;
         this.fullLink = fullLink;
         this.currentInheritance = currentInheritance;
-        this.maxLinksForPage = maxLinksForPage;
-        this.maxInheritance = maxInheritance;
+        this.crawler = crawler;
+        this.statistics = statistics;
         this.processedUrls = processedUrls;
     }
 
     @Override
     protected Set<String> compute() {
-        try {
-            return computeInternal();
+        long mills = System.currentTimeMillis();
+        try (final IgnoredCloseable ignored = statistics.getPage().start()) {
+            Set<String> result = computeInternal();
+            statistics.getPage().success(System.currentTimeMillis() - mills);
+            return result;
         } catch (IOException | RuntimeException e) {
             LOGGER.severe(String.format("Exception occurred during request to URL: %s. Message: %s", fullLink, e));
             return Collections.emptySet();
@@ -67,18 +72,44 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
         // keep the order
         Set<String> result = new LinkedHashSet<>();
 
-        // unblocking checking
-        if (processedUrls.putIfAbsent(fullLink, new Object()) != null) {
-            LOGGER.fine(String.format("URL %s already processed", fullLink));
-            return result;
-        }
-
         LOGGER.info(String.format("Processing the URL %s", fullLink));
 
-        Document document = Jsoup.connect(fullLink.toString()).ignoreHttpErrors(true).get();
+        statistics.getWebRequest().start();
 
+        Connection.Response response;
+
+        long mills = System.currentTimeMillis();
+        try (final IgnoredCloseable ignored = statistics.getWebRequest().start()) {
+            response = Jsoup.connect(fullLink.toString()).ignoreHttpErrors(true).method(Connection.Method.GET).execute();
+            statistics.getWebRequest().success(System.currentTimeMillis() - mills);
+        }
+
+        Document document;
+
+        mills = System.currentTimeMillis();
+        try (final IgnoredCloseable ignored = statistics.getParsing().start()) {
+            document = response.parse();
+            statistics.getParsing().success(System.currentTimeMillis() - mills);
+        }
+
+        LinkedList<EmailExtractionTask> tasks;
+
+        mills = System.currentTimeMillis();
+        try (final IgnoredCloseable ignored = statistics.getProcessing().start()) {
+            tasks = processingInternal(result, document);
+            statistics.getProcessing().success(System.currentTimeMillis() - mills);
+        }
+
+        addResultsFromTasks(result, tasks);
+
+        LOGGER.info(String.format("For url %s we got %s", fullLink, result));
+
+        return result;
+    }
+
+    private LinkedList<EmailExtractionTask> processingInternal(Set<String> result, Document document) {
         List<String> hrefs = document.select("a[href]").stream().map(element -> element.attr("href"))
-                .sorted(UrlComparator.INSTANCE).collect(Collectors.toList());
+                .sorted(crawler.getUrlComparator()).collect(Collectors.toList());
 
         LinkedList<EmailExtractionTask> tasks = new LinkedList<>();
 
@@ -89,22 +120,31 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
             if (href.startsWith("mailto:")) {
                 Matcher matcher = singleEmailPattern.matcher(href);
                 while (matcher.find()) {
-                    LOGGER.fine(String.format("Got email %s from 'mailto' tag", matcher.group()));
-                    result.add(matcher.group());
+                    final String email = matcher.group();
+                    if (emailCompatible(email)) {
+                        LOGGER.fine(String.format("Got email %s from 'mailto' tag", email));
+                        result.add(email);
+                    }
                 }
-            } else if (processesLinks < maxLinksForPage && currentInheritance < maxInheritance) {
+            } else if (processesLinks < crawler.getMaxLinksForPage() && currentInheritance < crawler.getMaxInheritance()) {
                 // we process only maxLinksForPage amount of links and if inheritance in not exceeded
                 if (href.startsWith("//")) {
                     final String tail = href.substring(1);
                     final Optional<URL> urlOptional = UrlUtils.makeUrl(rootDomain, tail);
                     if (urlOptional.isPresent()) {
                         URL url = urlOptional.get();
-                        LOGGER.fine(String.format("Following a // link. URL: %s", url));
-                        EmailExtractionTask task = new EmailExtractionTask(rootDomain, url, currentInheritance + 1,
-                                maxLinksForPage, maxInheritance, processedUrls);
-                        task.fork();
-                        tasks.add(task);
-                        processesLinks++;
+                        if (!processedUrls.contains(url)) {
+                            // racing could be here but it's acceptable because more important to avoid blocking
+                            processedUrls.offer(url);
+                            if (websiteCompatible(url)) {
+                                LOGGER.fine(String.format("Adding task for a //-task link. URL: %s", url));
+                                final EmailExtractionTask task = new EmailExtractionTask(rootDomain, url, currentInheritance + 1,
+                                        crawler, statistics, processedUrls);
+                                task.fork();
+                                tasks.add(task);
+                                processesLinks++;
+                            }
+                        }
                     } else {
                         LOGGER.severe(String.format("Unable to concatenate URL parts '%s' and '%s'", rootDomain, tail));
                     }
@@ -112,12 +152,18 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
                     final Optional<URL> urlOptional = UrlUtils.makeUrl(rootDomain, href);
                     if (urlOptional.isPresent()) {
                         URL url = urlOptional.get();
-                        LOGGER.fine(String.format("Following a / link. URL: %s", url));
-                        EmailExtractionTask task = new EmailExtractionTask(rootDomain, url, currentInheritance + 1,
-                                maxLinksForPage, maxInheritance, processedUrls);
-                        task.fork();
-                        tasks.add(task);
-                        processesLinks++;
+                        if (!processedUrls.contains(url)) {
+                            // racing could be here but it's acceptable because more important to avoid blocking
+                            processedUrls.offer(url);
+                            if (websiteCompatible(url)) {
+                                LOGGER.fine(String.format("Adding task for a /-type link. URL: %s", url));
+                                EmailExtractionTask task = new EmailExtractionTask(rootDomain, url, currentInheritance + 1,
+                                        crawler, statistics, processedUrls);
+                                task.fork();
+                                tasks.add(task);
+                                processesLinks++;
+                            }
+                        }
                     } else {
                         LOGGER.severe(String.format("Unable to concatenate URL parts '%s' and '%s'", rootDomain, href));
                     }
@@ -125,12 +171,18 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
                     final Optional<URL> urlOptional = UrlUtils.makeUrl(href);
                     if (urlOptional.isPresent()) {
                         URL url = urlOptional.get();
-                        LOGGER.fine(String.format("Following a full link. URL: %s", url));
-                        EmailExtractionTask task = new EmailExtractionTask(rootDomain, url, currentInheritance + 1,
-                                maxLinksForPage, maxInheritance, processedUrls);
-                        task.fork();
-                        tasks.add(task);
-                        processesLinks++;
+                        if (!processedUrls.contains(url)) {
+                            // racing could be here but it's acceptable because more important to avoid blocking 
+                            processedUrls.offer(url);
+                            if (websiteCompatible(url)) {
+                                LOGGER.fine(String.format("Adding task for a full link. URL: %s", url));
+                                EmailExtractionTask task = new EmailExtractionTask(rootDomain, url, currentInheritance + 1,
+                                        crawler, statistics, processedUrls);
+                                task.fork();
+                                tasks.add(task);
+                                processesLinks++;
+                            }
+                        }
                     } else {
                         LOGGER.severe(String.format("Unable to form URL from '%s'", href));
                     }
@@ -144,16 +196,32 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
 
             Matcher matcher = singleEmailPattern.matcher(text);
             while (matcher.find()) {
-                LOGGER.fine(String.format("Got email %s from email regexp", matcher.group()));
-                result.add(matcher.group());
+                final String email = matcher.group();
+                if (emailCompatible(email)) {
+                    LOGGER.fine(String.format("Got email %s from email regexp", email));
+                    result.add(email);
+                }
             }
         }
+        return tasks;
+    }
 
-        addResultsFromTasks(result, tasks);
+    private boolean websiteCompatible(URL url) {
+        for (String skipDomain : crawler.getSkipDomainsList()) {
+            if (url.getHost().equalsIgnoreCase(skipDomain)) {
+                return false;
+            }
+        }
+        return true;
+    }
 
-        LOGGER.info(String.format("For url %s we got %s", fullLink, result));
-
-        return result;
+    private boolean emailCompatible(String email) {
+        for (String pattern : crawler.getSkipEmailsPatterns()) {
+            if (email.matches(pattern)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void addResultsFromTasks(Set<String> list, List<EmailExtractionTask> tasks) {

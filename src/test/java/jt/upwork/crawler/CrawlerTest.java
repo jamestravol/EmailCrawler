@@ -1,43 +1,45 @@
 package jt.upwork.crawler;
 
-import org.junit.Ignore;
+import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
+import java.util.Map;
 import java.util.logging.LogManager;
 
 public class CrawlerTest {
 
-    @Ignore
-    @Test
-    public void testCrawler() throws IOException {
-
+    @BeforeClass
+    public static void init() throws IOException {
         InputStream configFile = CrawlerTest.class.getResourceAsStream("/logger.properties");
         LogManager.getLogManager().readConfiguration(configFile);
+    }
 
-        List<WebSite> domains = new ArrayList<>();
-        domains.add(new WebSite("0", UrlUtils.makeUrl("https://support.google.com/mail/answer/22370?hl=en").get()));
-        domains.add(new WebSite("0", UrlUtils.makeUrl("https://sparkmailapp.com/formal-email-template").get()));
-        domains.add(new WebSite("0", UrlUtils.makeUrl("https://www.rapidtables.com/web/html/mailto.html").get()));
+    @Test
+    public void testSingleWebsite() throws IOException {
+        final List<String> emails = Crawler.getEmails("https://support.google.com/mail/answer/22370?hl=e");
+        Assert.assertTrue(emails.size() > 0);
+    }
 
-        Crawler crawler = new Crawler(5, 5, 30);
+    @Test
+    public void testMultipleWebsites() throws IOException {
 
-        crawler.crawl(domains, (webSite, emails) -> System.out.println(webSite.toString() + emails));
-        crawler.crawl(domains, (webSite, emails) -> System.out.println(webSite.toString() + emails));
+        List<String> websites = new ArrayList<>();
+        websites.add("https://support.google.com/mail/answer/22370?hl=en");
+        websites.add("https://sparkmailapp.com/formal-email-template");
+        websites.add("https://www.rapidtables.com/web/html/mailto.html");
 
-        while (!crawler.await(1, TimeUnit.SECONDS)) {
-            System.out.printf("******************************************\n");
-            System.out.printf("Main: Parallelism: %d\n", crawler.getPool().getParallelism());
-            System.out.printf("Main: Active Threads: %d\n", crawler.getPool().getActiveThreadCount());
-            System.out.printf("Main: Task Count: %d\n", crawler.getPool().getQueuedTaskCount());
-            System.out.printf("Main: Steal Count: %d\n", crawler.getPool().getStealCount());
-            System.out.printf("******************************************\n");
+        final Map<String, List<String>> result = Crawler.getEmails(websites);
+        Assert.assertEquals(3, result.size());
+
+        for (String website : websites) {
+            Assert.assertTrue(result.containsKey(website));
+            Assert.assertTrue(result.get(website).size() > 0);
         }
-
     }
 
 }
