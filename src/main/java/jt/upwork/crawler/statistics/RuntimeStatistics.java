@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
 
@@ -17,6 +18,11 @@ public class RuntimeStatistics {
 
     private final AtomicLong startMills = new AtomicLong();
 
+    /**
+     * Founded emails counter
+     */
+    private final AtomicInteger emails = new AtomicInteger();
+    
     /**
      * The data requesting from the database
      */
@@ -69,6 +75,10 @@ public class RuntimeStatistics {
         startMills.set(System.currentTimeMillis());
     }
 
+    public void addEmails(int count) {
+        emails.addAndGet(count);
+    }
+
     public RuntimeStageStatistic getDataRequest() {
         return dataRequest;
     }
@@ -99,9 +109,9 @@ public class RuntimeStatistics {
 
     public void log(ForkJoinPool forkJoinPool) {
         final String message = String.format(
-                "\rTime: %s. Threads active: %d, run: %d. Queue: %d. Tasks: %d. Data: %d-%d ms. Websites: %d/%d-%d ms. Pages: %d/%d-%d ms. Requests: %d-%d ms. Parsings: %d-%d ms. Processings: %d-%d ms. Callbacks: %d/%d-%d ms.",
+                "\rTime: %s. Threads active: %d/%d, run: %d. Queue: %d. Emails: %d. Data: %d-%d ms. Websites: %d/%d-%d ms. Pages: %d/%d-%d ms. Requests: %d-%d ms. Parsings: %d-%d ms. Processings: %d-%d ms. Callbacks: %d/%d-%d ms.",
                 TIME_FORMATTER.format(Instant.ofEpochMilli(System.currentTimeMillis() - startMills.get()).atZone(ZoneId.systemDefault()).toLocalDateTime()),
-                forkJoinPool.getActiveThreadCount(), forkJoinPool.getRunningThreadCount(), forkJoinPool.getQueuedSubmissionCount(), forkJoinPool.getQueuedTaskCount(),
+                forkJoinPool.getActiveThreadCount(), forkJoinPool.getParallelism(), forkJoinPool.getRunningThreadCount(), forkJoinPool.getQueuedSubmissionCount(), emails.get(),
                 dataRequest.getInProgress(), dataRequest.getAverageExecutionTime(),
                 website.getInProgress(), website.getTriesCount(), website.getAverageExecutionTime(),
                 page.getInProgress(), page.getTriesCount(), page.getAverageExecutionTime(),

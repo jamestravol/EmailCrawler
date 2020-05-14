@@ -44,6 +44,7 @@ public final class RootEmailExtractionTask extends EmailExtractionTask {
         if (extractionCompleted != null) {
             final long mills = System.currentTimeMillis();
             try (final IgnoredCloseable ignored = statistics.getCallback().start()) {
+                statistics.addEmails(result.size());
                 extractionCompleted.onComplete(webSite, result);
                 statistics.getCallback().success(System.currentTimeMillis() - mills);
             }
