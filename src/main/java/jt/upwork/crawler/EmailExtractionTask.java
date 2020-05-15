@@ -10,6 +10,7 @@ import org.jsoup.nodes.Element;
 import java.io.IOException;
 import java.net.URL;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
@@ -85,7 +86,7 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
 
         long mills = System.currentTimeMillis();
         try (final IgnoredCloseable ignored = statistics.getWebRequest().start()) {
-            response = Jsoup.connect(fullLink.toString()).ignoreHttpErrors(true).method(Connection.Method.GET).execute();
+            response = Jsoup.connect(fullLink.toString()).ignoreHttpErrors(true).method(Connection.Method.GET).timeout(300000).execute();
             statistics.getWebRequest().success(System.currentTimeMillis() - mills);
         }
 
@@ -140,7 +141,7 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
                             processedUrls.offer(url);
                             if (websiteCompatible(url)) {
                                 LOGGER.fine(String.format("Adding task for a //-task link. URL: %s", url));
-                                forkOrExecute(tasks, url, result);
+                                forkOrExecute(tasks, url);
                                 processesLinks++;
                             }
                         }
@@ -156,7 +157,7 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
                             processedUrls.offer(url);
                             if (websiteCompatible(url)) {
                                 LOGGER.fine(String.format("Adding task for a /-type link. URL: %s", url));
-                                forkOrExecute(tasks, url, result);
+                                forkOrExecute(tasks, url);
                                 processesLinks++;
                             }
                         }
@@ -172,7 +173,7 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
                             processedUrls.offer(url);
                             if (websiteCompatible(url)) {
                                 LOGGER.fine(String.format("Adding task for a full link. URL: %s", url));
-                                forkOrExecute(tasks, url, result);
+                                forkOrExecute(tasks, url);
                                 processesLinks++;
                             }
                         }
@@ -199,23 +200,11 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
         return result;
     }
 
-    private void forkOrExecute(LinkedList<EmailExtractionTask> tasks, URL url, Set<String> result) {
-        // here is the trick which allows stop threads flooding by ForkJoinPool. 
-        // if threads are overcrowded we dont start a new task, but continue execution in current 
-        if (crawler.getPool().getActiveThreadCount() > crawler.getPool().getParallelism()) {
-            long mills = System.currentTimeMillis();
-            try (final IgnoredCloseable ignored = statistics.getPage().start()) {
-                result.addAll(computeTheResult(tasks, url));
-                statistics.getPage().success(System.currentTimeMillis() - mills);
-            } catch (IOException | RuntimeException e) {
-                LOGGER.severe(String.format("Exception occurred during request (in subfunction) to URL: %s. Message: %s", fullLink, e));
-            }
-        } else {
-            final EmailExtractionTask task = new EmailExtractionTask(rootDomain, url, currentInheritance + 1,
-                    crawler, statistics, processedUrls);
-            task.fork();
-            tasks.add(task);
-        }
+    private void forkOrExecute(LinkedList<EmailExtractionTask> tasks, URL url) {
+        final EmailExtractionTask task = new EmailExtractionTask(rootDomain, url, currentInheritance + 1,
+                crawler, statistics, processedUrls);
+        task.fork();
+        tasks.add(task);
     }
 
     private boolean websiteCompatible(URL url) {
@@ -236,9 +225,10 @@ public class EmailExtractionTask extends RecursiveTask<Set<String>> {
         return true;
     }
 
-    private void addResultsFromTasks(Set<String> list, List<EmailExtractionTask> tasks) {
-        for (EmailExtractionTask item : tasks) {
-            list.addAll(item.join());
+    private void addResultsFromTasks(Set<String> list, LinkedList<EmailExtractionTask> tasks) {
+        final Iterator<EmailExtractionTask> iterator = tasks.descendingIterator();
+        while (iterator.hasNext()) {
+            list.addAll(iterator.next().join());
         }
     }
 

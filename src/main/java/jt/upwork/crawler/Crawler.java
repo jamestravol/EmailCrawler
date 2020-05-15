@@ -84,7 +84,7 @@ public final class Crawler implements AutoCloseable {
                    String[] skipEmailsPatterns, String[] priorityLinkContains) {
         this.maxLinksForPage = maxLinksForPage;
         this.maxInheritance = maxInheritance;
-        this.pool = new ForkJoinPool(threadCount);
+        this.pool = new ForkJoinPool(threadCount, ForkJoinPool.defaultForkJoinWorkerThreadFactory, null, true);
         this.skipDomainsList = skipDomainsList;
         this.skipEmailsPatterns = skipEmailsPatterns;
         this.urlComparator = UrlComparator.of(priorityLinkContains);
